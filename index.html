@@ -457,18 +457,6 @@ function startListeners(){
     var v=s.val();
     if(v){document.getElementById('nameInput').value=v;document.getElementById('nameInput').disabled=true;}
   });
-  // deviceWins realtime — disable spin kalau sudah max
-  db.ref('deviceWins/'+DEVID).on('value',function(s){
-    var dw=s.val()||0;
-    if(cfg.maxWinPerDevice>0&&dw>=cfg.maxWinPerDevice){
-      var btn=document.getElementById('spinBtn');
-      if(btn&&!spinning){btn.disabled=true;btn.innerText='BATAS MENANG TERCAPAI';}
-    } else {
-      var btn=document.getElementById('spinBtn');
-      if(btn&&!spinning){btn.disabled=false;btn.innerText='SPIN RNG';}
-    }
-  });
-
   // presence
   var pRef=db.ref('presence/'+DEVID);
   pRef.set({t:Date.now()});pRef.onDisconnect().remove();
@@ -523,18 +511,6 @@ async function doSpin(){
   if(!testMode){
     if(!cfg.eventOn){toast('Event sedang OFF','error');return;}
 
-    // Cek max menang per user SEBELUM apapun — baca fresh dari Firebase
-    if(cfg.maxWinPerDevice>0){
-      var dwChk=await db.ref('deviceWins/'+DEVID).once('value');
-      var dwVal=dwChk.val()||0;
-      if(dwVal>=cfg.maxWinPerDevice){
-        toast('Kamu sudah mencapai batas menang ('+dwVal+'/'+cfg.maxWinPerDevice+')!','error');
-        document.getElementById('spinBtn').disabled=true;
-        document.getElementById('spinBtn').innerText='BATAS MENANG TERCAPAI';
-        return;
-      }
-    }
-
     var ns=await db.ref('lockedNames/'+DEVID).once('value'),ln=ns.val();
     if(ln){name=ln;}else{
       if(!name){toast('Masukkan nama dulu!','error');return;}
@@ -551,8 +527,36 @@ async function doSpin(){
     await db.ref('userSpins/'+DEVID).transaction(function(v){return Math.max(0,(v||0)-1);});
     db.ref('spinTotal/'+DEVID).transaction(function(v){return(v||0)+1;});
   }else{if(!name)name='TEST';}
+  // Cek apakah harus force ZONK (limit menang tercapai)
+  var forceZonk=false;
+  if(!testMode){
+    // Cek device wins limit
+    if(cfg.maxWinPerDevice>0){
+      var _dw=await db.ref('deviceWins/'+DEVID).once('value');
+      if((_dw.val()||0)>=cfg.maxWinPerDevice) forceZonk=true;
+    }
+    // Cek global winners limit
+    if(!forceZonk&&cfg.maxWinnerGlobal>0){
+      if(winCount>=cfg.maxWinnerGlobal) forceZonk=true;
+    }
+  }
+
+  // RNG normal dulu
   var tw=prizes.reduce(function(s,p){return s+(p.weight||1);},0),rnd=Math.random()*tw,idx=prizes.length-1;
   for(var i=0;i<prizes.length;i++){rnd-=(prizes[i].weight||1);if(rnd<=0){idx=i;break;}}
+
+  // Kalau force zonk: cari zonk item terdekat dengan weighted random juga
+  if(forceZonk){
+    var zonkItems=prizes.map(function(p,i){return{p:p,i:i};}).filter(function(x){return!x.p.win;});
+    if(zonkItems.length>0){
+      var zw=zonkItems.reduce(function(s,x){return s+(x.p.weight||1);},0);
+      var zr=Math.random()*zw;
+      idx=zonkItems[zonkItems.length-1].i;
+      for(var j=0;j<zonkItems.length;j++){zr-=(zonkItems[j].p.weight||1);if(zr<=0){idx=zonkItems[j].i;break;}}
+    }
+    // Kalau tidak ada zonk item sama sekali, biarkan hasil RNG normal (hadiah tetap)
+  }
+
   spinning=true;
   var btn=document.getElementById('spinBtn');
   btn.disabled=true;btn.innerText='SPINNING...';
@@ -582,24 +586,16 @@ async function doSpin(){
   });
 }
 async function doWin(name,prize){
+  // Double-check sebelum simpan (anti race condition)
   var ws=await db.ref('winners').once('value'),wl=ws.val()||[];
-  if(cfg.maxWinnerGlobal>0&&wl.length>=cfg.maxWinnerGlobal){toast('Slot pemenang penuh!','warn');return;}
+  if(cfg.maxWinnerGlobal>0&&wl.length>=cfg.maxWinnerGlobal) return; // silent, sudah di-handle force zonk
   var dw=await db.ref('deviceWins/'+DEVID).once('value'),dwv=dw.val()||0;
-  if(cfg.maxWinPerDevice>0&&dwv>=cfg.maxWinPerDevice){toast('Batas menang per device!','warn');return;}
+  if(cfg.maxWinPerDevice>0&&dwv>=cfg.maxWinPerDevice) return; // silent
   wl.push({name:name,prize:prize,deviceId:DEVID,time:wibTime()});
   await db.ref('winners').set(wl);
   await db.ref('deviceWins/'+DEVID).transaction(function(v){return(v||0)+1;});
   document.getElementById('claimBtn').style.display='block';
   showWinOv(name,prize);doConfetti();
-  // Cek apakah sudah capai batas menang setelah menang ini
-  if(cfg.maxWinPerDevice>0){
-    var dwAfter=await db.ref('deviceWins/'+DEVID).once('value');
-    if((dwAfter.val()||0)>=cfg.maxWinPerDevice){
-      document.getElementById('spinBtn').disabled=true;
-      document.getElementById('spinBtn').innerText='BATAS MENANG TERCAPAI';
-      toast('Kamu sudah mencapai batas menang maksimal!','warn');
-    }
-  }
 }
 async function saveNH(devId,nm){
   var s=await db.ref('nameHistory/'+devId).once('value'),h=s.val()||[];
@@ -997,3 +993,4 @@ window.addEventListener('load',function(){
 </script>
 </body>
 </html>
+
